@@ -82,7 +82,7 @@ def trade_setup():
             st.caption(hint)
     return key,market,balance,entry,stop,leverage,conversion
 
-def risk_controls(balance):
+def risk_controls():
     with st.container(border=True):
         heading("Risk controls", "Define the amount this trade is allowed to lose.")
         a,b=st.columns(2)
@@ -90,20 +90,12 @@ def risk_controls(balance):
         today=b.number_input("Loss already taken today ($)",min_value=0.0,value=0.0,step=10.0)
         with st.expander("Advanced risk limits"):
             a,b=st.columns(2)
-            cap_mode=a.radio("Maximum risk mode",("Automatic","Custom"),horizontal=True)
-            cap_pct=a.number_input("Automatic maximum risk (%)",min_value=.01,max_value=100.0,value=1.0,step=.1,disabled=cap_mode!="Automatic")
-            cap_custom=a.number_input("Custom maximum risk ($)",min_value=.01,value=None,placeholder="e.g. 100",disabled=cap_mode!="Custom")
-            daily_mode=b.radio("Daily loss limit mode",("Automatic","Custom"),horizontal=True)
-            daily_pct=b.number_input("Automatic daily limit (%)",min_value=.01,max_value=100.0,value=3.0,step=.1,disabled=daily_mode!="Automatic")
-            daily_custom=b.number_input("Custom daily loss limit ($)",min_value=.01,value=None,placeholder="e.g. 300",disabled=daily_mode!="Custom")
-            maintenance=st.number_input("Maintenance margin assumption (%)",min_value=0.0,max_value=99.0,value=MAINTENANCE_MARGIN_RATE*100,step=.1)
-            automatic_cap=None if balance is None else balance*cap_pct/100
-            automatic_daily=None if balance is None else balance*daily_pct/100
-            a.caption("Automatic cap: " + ("Enter balance" if automatic_cap is None else money(automatic_cap)))
-            b.caption("Automatic daily limit: " + ("Enter balance" if automatic_daily is None else money(automatic_daily)))
-    cap=automatic_cap if cap_mode=="Automatic" else cap_custom
-    daily=automatic_daily if daily_mode=="Automatic" else daily_custom
-    return risk,today,cap,daily,maintenance,cap_mode,daily_mode
+            use_cap=a.toggle("Use maximum risk per trade",value=MAX_RISK_PER_TRADE is not None)
+            cap=a.number_input("Maximum risk ($)",min_value=.01,value=float(MAX_RISK_PER_TRADE or 100),disabled=not use_cap)
+            use_daily=b.toggle("Use daily loss limit",value=DAILY_LOSS_LIMIT is not None)
+            daily=b.number_input("Daily loss limit ($)",min_value=.01,value=float(DAILY_LOSS_LIMIT or 300),disabled=not use_daily)
+            st.caption(f"Maintenance margin assumption: {MAINTENANCE_MARGIN_RATE:.2%}")
+    return risk,today,use_cap,cap,use_daily,daily
 
 def take_profit_plan(entry,stop):
     with st.container(border=True):
@@ -156,13 +148,13 @@ def results(result,market,balance,daily_enabled,target_rs):
         b.metric("Break-even win rate","N/A" if result["breakeven"] is None else f"{result['breakeven']:.1f}%")
         c.metric("Stop-outs remaining" if daily_enabled else "Fees, all targets",str(result["stopouts_to_limit"]) if daily_enabled else money(result["fees_all_hit"]))
 
-def validation(balance,risk,entry,stop,leverage,conversion,market,targets,cap,daily,mode):
+def validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily,mode):
     errors=[]
     required={"Account balance":balance,"Risk per trade":risk,"Entry price":entry,"Stop-loss price":stop}
     if market["leveraged"]: required["Leverage"]=leverage
     if market["quote"] in ("cross_direct","cross_inverse"): required["USD conversion-pair price"]=conversion
-    required["Maximum risk"]=cap
-    required["Daily loss limit"]=daily
+    if use_cap: required["Maximum risk"]=cap
+    if use_daily: required["Daily loss limit"]=daily
     for name,value in required.items():
         if value is None: errors.append(f"{name} is required.")
     for index,(target,pct,r_multiple) in enumerate(targets,1):
@@ -202,19 +194,19 @@ def main():
         with left:
             with st.container(key="inputs_panel"):
                 key,market,balance,entry,stop,leverage,conversion=trade_setup()
-                risk,today,cap,daily,maintenance,cap_mode,daily_mode=risk_controls(balance)
+                risk,today,use_cap,cap,use_daily,daily=risk_controls()
                 targets,move,target_mode=take_profit_plan(entry,stop)
                 pressed=st.button("Calculate position size",type="primary",width="stretch")
     engine_targets=[(target,pct) for target,pct,_ in targets]
     target_rs=[r for _,_,r in targets]
-    inputs=(key,balance,risk,entry,stop,tuple(targets),conversion,leverage,cap,daily,maintenance,today,move,target_mode)
+    inputs=(key,balance,risk,entry,stop,tuple(targets),conversion,leverage,use_cap,cap,use_daily,daily,today,move,target_mode)
     current=signature(inputs)
     if pressed:
-        errors=validation(balance,risk,entry,stop,leverage,conversion,market,targets,cap,daily,target_mode)
+        errors=validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily,target_mode)
         if errors: st.session_state.pop("result",None);st.session_state["error"]=errors
         else:
             try:
-                st.session_state["result"]=calculate(market,balance,risk,entry,stop,engine_targets,conv_rate=conversion,leverage=leverage,max_risk_per_trade=cap,daily_limit=daily,loss_today=0.0 if today is None else today,move_sl_to_be=move,maintenance_margin_rate=maintenance/100)
+                st.session_state["result"]=calculate(market,balance,risk,entry,stop,engine_targets,conv_rate=conversion,leverage=leverage,max_risk_per_trade=cap if use_cap else None,daily_limit=daily if use_daily else None,loss_today=0.0 if today is None else today,move_sl_to_be=move)
                 st.session_state["target_rs"]=target_rs
                 st.session_state.pop("error",None)
             except ValueError as error: st.session_state.pop("result",None);st.session_state["error"]=[str(error)]
@@ -226,7 +218,7 @@ def main():
             if st.session_state.get("error") and fresh:
                 for error in st.session_state["error"]:st.error(error)
             if st.session_state.get("result") and fresh:
-                results(st.session_state["result"],market,balance,True,st.session_state.get("target_rs",target_rs));warnings(st.session_state["result"],risk,balance)
+                results(st.session_state["result"],market,balance,use_daily,st.session_state.get("target_rs",target_rs));warnings(st.session_state["result"],risk,balance)
             else:
                 text="Inputs changed. Recalculate to refresh every result." if st.session_state.get("result") or st.session_state.get("error") else "Enter your trade details, then calculate position size."
                 st.markdown(f'<div class="empty"><strong>Awaiting calculation</strong>{text}</div>',unsafe_allow_html=True)
