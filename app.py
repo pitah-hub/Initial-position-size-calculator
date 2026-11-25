@@ -56,6 +56,22 @@ def direction(entry, stop):
     return "LONG" if stop < entry else "SHORT"
 def signature(values): return repr(values)
 
+def resolve_target(text, entry, stop):
+    """Mirror the engine's target input convention: price or R multiple."""
+    if not text or entry is None or stop is None:
+        return None
+    cleaned=text.strip().replace(",","").lower()
+    try:
+        if cleaned.endswith("r"):
+            multiple=float(cleaned[:-1])
+            if not math.isfinite(multiple) or multiple <= 0: return None
+            risk=abs(entry-stop)
+            return entry+risk*multiple if stop<entry else entry-risk*multiple
+        value=float(cleaned)
+        return value if math.isfinite(value) and value>0 else None
+    except ValueError:
+        return None
+
 def trade_setup():
     with st.container(border=True):
         heading("Trade setup", "Select your market and enter the trade details.")
@@ -99,25 +115,25 @@ def risk_controls():
 
 def take_profit_plan(entry,stop):
     with st.container(border=True):
-        heading("Take-profit plan", "Set one to three targets and choose how to close the position.")
+        heading("Take-profit plan", "Type a target price or a risk multiple such as 2R.")
         count=st.radio("Number of targets",(1,2,3),horizontal=True)
-        mode=st.radio("Target method",("R Multiple (recommended)","Manual price"),horizontal=True)
-        a,b,c=st.columns([1,2,2]);a.markdown("**Target**");b.markdown("**R multiple / price**");c.markdown("**Allocation**")
-        targets=[]
+        a,b,c=st.columns([1,2,2]);a.markdown("**Target**");b.markdown("**Price or R multiple**");c.markdown("**Close position**")
+        targets=[]; remaining=100.0
         for index in range(count):
             a,b,c=st.columns([1,2,2]);a.markdown(f"**TP{index+1}**")
-            r_multiple=None
-            if mode.startswith("R Multiple"):
-                r_multiple=b.number_input(f"TP{index+1} R multiple",min_value=.01,value=None,placeholder=f"e.g. {index+1}",step=.1,key=f"tp_r_{index}",label_visibility="collapsed")
-                target=None if entry is None or stop is None or r_multiple is None else entry+(abs(entry-stop)*r_multiple if entry>stop else -abs(entry-stop)*r_multiple)
-                b.caption("Target: --" if target is None else f"Target: {fmt_price(target)}")
+            text=b.text_input(f"TP{index+1} price or R",placeholder="e.g. 1.1100 or 2R",key=f"tp_value_{index}",label_visibility="collapsed")
+            target=resolve_target(text,entry,stop)
+            if index<count-1:
+                pct=c.number_input(f"TP{index+1} allocation",min_value=.01,max_value=max(.01,remaining-.01),value=None,placeholder="e.g. 50",step=1.0,key=f"tp_pct_{index}",label_visibility="collapsed")
+                if pct is not None: remaining-=pct
             else:
-                target=b.number_input(f"TP{index+1} price",min_value=.00000001,value=None,placeholder="e.g. 1.1100",format="%.8f",key=f"tp_price_{index}",label_visibility="collapsed")
-            pct=c.number_input(f"TP{index+1} allocation",min_value=.01,max_value=100.0,value=None,placeholder="e.g. 50",step=1.0,key=f"tp_pct_{index}",label_visibility="collapsed")
-            targets.append((target,pct,r_multiple))
+                pct=remaining
+                c.markdown(f"**{pct:g}%** (remainder)")
+            if text and target is not None: b.caption(f"Resolved price: {fmt_price(target)}")
+            targets.append((target,pct,text))
         move=True if count==1 else st.toggle("Move remaining stop to break-even after TP1",value=True)
-        st.caption("Enter an allocation for every target. Their total must equal 100%.")
-    return targets,move,mode
+        st.caption("Targets must move progressively into profit. The final target receives the remaining allocation.")
+    return targets,move
 
 def requirements(result):
     with st.container(border=True):
@@ -127,7 +143,7 @@ def requirements(result):
         cols[1].metric("Required margin",money(result["margin"]))
         if result["liquidation"] is not None: cols[2].metric("Est. liquidation",fmt_price(result["liquidation"]))
 
-def results(result,market,balance,daily_enabled,target_rs):
+def results(result,market,balance,daily_enabled):
     css="long" if result["direction"]=="LONG" else "short"
     st.markdown(f'<div class="hero"><p>CALCULATED POSITION SIZE</p><div class="value">{result["size"]:,.4f} {market["unit"]}</div><p><span class="pill {css}">{result["direction"]}</span></p></div>',unsafe_allow_html=True)
     a,b,c=st.columns(3)
@@ -138,7 +154,7 @@ def results(result,market,balance,daily_enabled,target_rs):
     requirements(result)
     with st.container(border=True):
         heading("Take-profit breakdown","Estimated results after the engine's fee assumptions.")
-        st.dataframe([{"Target":f"TP{i}","Price":fmt_price(s["price"]),"Allocation":f"{s['pct']:g}% | {s['size']:,.4f} {market['unit']}","Planned R":f"{target_rs[i-1]:g}R" if target_rs[i-1] is not None else f"{s['r']:.2f}R","Est. net profit":money(s["profit"])} for i,s in enumerate(result["stages"],1)],hide_index=True,width="stretch")
+        st.dataframe([{"Target":f"TP{i}","Price":fmt_price(s["price"]),"Allocation":f"{s['pct']:g}% | {s['size']:,.4f} {market['unit']}","R multiple":f"{s['r']:.2f}R","Est. net profit":money(s["profit"])} for i,s in enumerate(result["stages"],1)],hide_index=True,width="stretch")
     with st.container(border=True):
         heading("Outcome scenarios","Net outcome after fees for each possible path.")
         st.dataframe([{"Scenario":name,"Net outcome":money(amount),"Status":"Profit" if amount>=0 else "Loss"} for name,amount in result["scenarios"]],hide_index=True,width="stretch")
@@ -148,7 +164,7 @@ def results(result,market,balance,daily_enabled,target_rs):
         b.metric("Break-even win rate","N/A" if result["breakeven"] is None else f"{result['breakeven']:.1f}%")
         c.metric("Stop-outs remaining" if daily_enabled else "Fees, all targets",str(result["stopouts_to_limit"]) if daily_enabled else money(result["fees_all_hit"]))
 
-def validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily,mode):
+def validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily):
     errors=[]
     required={"Account balance":balance,"Risk per trade":risk,"Entry price":entry,"Stop-loss price":stop}
     if market["leveraged"]: required["Leverage"]=leverage
@@ -157,16 +173,15 @@ def validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_ca
     if use_daily: required["Daily loss limit"]=daily
     for name,value in required.items():
         if value is None: errors.append(f"{name} is required.")
-    for index,(target,pct,r_multiple) in enumerate(targets,1):
-        if target is None: errors.append(f"TP{index} price is required.")
+    for index,(target,pct,text) in enumerate(targets,1):
+        if not text: errors.append(f"TP{index} price or R multiple is required.")
+        elif target is None: errors.append(f"TP{index} must be a valid price or positive R multiple.")
         if pct is None: errors.append(f"TP{index} allocation is required.")
     if errors: return errors
     if math.isclose(entry,stop): errors.append("Entry and stop-loss prices cannot be the same.")
-    long=stop<entry; previous=entry; previous_r=0
-    for i,(target,pct,r_multiple) in enumerate(targets,1):
+    long=stop<entry; previous=entry
+    for i,(target,pct,text) in enumerate(targets,1):
         if (long and target<=previous) or (not long and target>=previous): errors.append(f"TP{i} must be further into profit than the previous price.")
-        if mode.startswith("R Multiple") and (r_multiple is None or r_multiple<=previous_r): errors.append("R multiples must be positive and progressively increase.")
-        previous_r=r_multiple if r_multiple is not None else previous_r
         if pct<=0: errors.append(f"TP{i} allocation must be greater than 0%.")
         previous=target
     if not math.isclose(sum(pct for _,pct,_ in targets),100.0,abs_tol=1e-6): errors.append("Take-profit allocations must total exactly 100%.")
@@ -195,19 +210,17 @@ def main():
             with st.container(key="inputs_panel"):
                 key,market,balance,entry,stop,leverage,conversion=trade_setup()
                 risk,today,use_cap,cap,use_daily,daily=risk_controls()
-                targets,move,target_mode=take_profit_plan(entry,stop)
+                targets,move=take_profit_plan(entry,stop)
                 pressed=st.button("Calculate position size",type="primary",width="stretch")
     engine_targets=[(target,pct) for target,pct,_ in targets]
-    target_rs=[r for _,_,r in targets]
-    inputs=(key,balance,risk,entry,stop,tuple(targets),conversion,leverage,use_cap,cap,use_daily,daily,today,move,target_mode)
+    inputs=(key,balance,risk,entry,stop,tuple(targets),conversion,leverage,use_cap,cap,use_daily,daily,today,move)
     current=signature(inputs)
     if pressed:
-        errors=validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily,target_mode)
+        errors=validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily)
         if errors: st.session_state.pop("result",None);st.session_state["error"]=errors
         else:
             try:
                 st.session_state["result"]=calculate(market,balance,risk,entry,stop,engine_targets,conv_rate=conversion,leverage=leverage,max_risk_per_trade=cap if use_cap else None,daily_limit=daily if use_daily else None,loss_today=0.0 if today is None else today,move_sl_to_be=move)
-                st.session_state["target_rs"]=target_rs
                 st.session_state.pop("error",None)
             except ValueError as error: st.session_state.pop("result",None);st.session_state["error"]=[str(error)]
         st.session_state["signature"]=current
@@ -218,7 +231,7 @@ def main():
             if st.session_state.get("error") and fresh:
                 for error in st.session_state["error"]:st.error(error)
             if st.session_state.get("result") and fresh:
-                results(st.session_state["result"],market,balance,use_daily,st.session_state.get("target_rs",target_rs));warnings(st.session_state["result"],risk,balance)
+                results(st.session_state["result"],market,balance,use_daily);warnings(st.session_state["result"],risk,balance)
             else:
                 text="Inputs changed. Recalculate to refresh every result." if st.session_state.get("result") or st.session_state.get("error") else "Enter your trade details, then calculate position size."
                 st.markdown(f'<div class="empty"><strong>Awaiting calculation</strong>{text}</div>',unsafe_allow_html=True)
