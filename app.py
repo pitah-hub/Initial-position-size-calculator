@@ -35,6 +35,12 @@ def style():
     .hero{background:linear-gradient(135deg,#102d61,#1f62bb);border-radius:12px;color:#fff;padding:1.15rem 1.2rem;margin-bottom:1rem}
     .hero p{margin:0;color:#dbe9ff;font-size:.8rem}.hero .value{font-size:2rem;font-weight:700;line-height:1.2}
     .empty{border:1px dashed #bfcee4;background:#f8faff;border-radius:12px;padding:4rem 1rem;text-align:center;color:#5e7190}.empty strong{display:block;color:#10234a;margin-bottom:.3rem}
+    @media (max-width:850px){
+      .st-key-main_grid [data-testid=stHorizontalBlock]{flex-direction:column!important;gap:1rem!important}
+      .st-key-main_grid [data-testid=column]{width:100%!important;min-width:100%!important;flex:1 1 100%!important}
+      .st-key-main_grid [data-testid=stDataFrame]{max-width:100%;overflow-x:auto}
+      .block-container{padding-left:.8rem;padding-right:.8rem}
+    }
     </style>""", unsafe_allow_html=True)
 
 def money(value): return "$" + format(value, ",.2f")
@@ -43,7 +49,9 @@ def label(key): return MARKETS[key]["name"]
 def heading(title, subtitle):
     st.subheader(title)
     st.markdown(f'<p class="sub">{subtitle}</p>', unsafe_allow_html=True)
-def direction(entry, stop): return "LONG" if stop < entry else "SHORT"
+def direction(entry, stop):
+    if entry is None or stop is None: return "--"
+    return "LONG" if stop < entry else "SHORT"
 def signature(values): return repr(values)
 
 def trade_setup():
@@ -52,22 +60,23 @@ def trade_setup():
         key = st.selectbox("Market", list(MARKETS), format_func=label)
         market = MARKETS[key]
         a,b = st.columns([3,1])
-        balance = a.number_input("Account balance ($)", min_value=.01, value=10000.0, step=100.0)
+        balance = a.number_input("Account balance ($)", min_value=.01, value=None, placeholder="e.g. 10000", step=100.0)
         entry_col,stop_col,lev_col = st.columns(3)
-        entry = entry_col.number_input("Entry price", min_value=.00000001, value=100.0, format="%.8f", key="entry")
-        stop = stop_col.number_input("Stop-loss price", min_value=.00000001, value=95.0, format="%.8f", key="stop")
+        entry = entry_col.number_input("Entry price", min_value=.00000001, value=None, placeholder="e.g. 1.1050", format="%.8f", key="entry")
+        stop = stop_col.number_input("Stop-loss price", min_value=.00000001, value=None, placeholder="e.g. 1.1000", format="%.8f", key="stop")
         trade_direction = direction(entry, stop)
         b.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-        b.markdown(f'<span class="pill {"long" if trade_direction == "LONG" else "short"}">{trade_direction}</span>', unsafe_allow_html=True)
+        direction_class = "long" if trade_direction == "LONG" else "short"
+        b.markdown(f'<span class="pill {direction_class}">{trade_direction}</span>', unsafe_allow_html=True)
         leverage = 1.0
         if market["leveraged"]:
-            leverage = lev_col.number_input("Leverage (1: value)", min_value=1.0, value=10.0, step=1.0)
+            leverage = lev_col.number_input("Leverage (1: value)", min_value=1.0, value=None, placeholder="e.g. 100", step=1.0)
         else:
             lev_col.caption("Unleveraged market (1:1)")
         conversion = None
         if market["quote"] in ("cross_direct","cross_inverse"):
             hint = "EURGBP: enter GBPUSD" if market["quote"] == "cross_direct" else "EURJPY: enter USDJPY"
-            conversion = st.number_input("USD conversion-pair price", min_value=.00000001, value=1.0, format="%.8f", help=hint)
+            conversion = st.number_input("USD conversion-pair price", min_value=.00000001, value=None, placeholder="e.g. 1.2500", format="%.8f", help=hint)
             st.caption(hint)
     return key,market,balance,entry,stop,leverage,conversion
 
@@ -75,14 +84,14 @@ def risk_controls():
     with st.container(border=True):
         heading("Risk controls", "Define the amount this trade is allowed to lose.")
         a,b=st.columns(2)
-        risk=a.number_input("Risk per trade (%)",min_value=.01,max_value=100.0,value=1.0,step=.1)
-        today=b.number_input("Loss already taken today ($)",min_value=0.0,value=0.0,step=10.0)
+        risk=a.number_input("Risk per trade (%)",min_value=.01,max_value=100.0,value=None,placeholder="e.g. 1",step=.1)
+        today=b.number_input("Loss already taken today ($)",min_value=0.0,value=None,placeholder="Optional; defaults to 0",step=10.0)
         with st.expander("Advanced risk limits"):
             a,b=st.columns(2)
             use_cap=a.toggle("Maximum risk per trade",value=MAX_RISK_PER_TRADE is not None)
-            cap=a.number_input("Maximum risk ($)",min_value=.01,value=float(MAX_RISK_PER_TRADE or 100),disabled=not use_cap)
+            cap=a.number_input("Maximum risk ($)",min_value=.01,value=None,placeholder="e.g. 100",disabled=not use_cap)
             use_daily=b.toggle("Daily loss limit",value=DAILY_LOSS_LIMIT is not None)
-            daily=b.number_input("Daily loss limit ($)",min_value=.01,value=float(DAILY_LOSS_LIMIT or 300),disabled=not use_daily)
+            daily=b.number_input("Daily loss limit ($)",min_value=.01,value=None,placeholder="e.g. 300",disabled=not use_daily)
             st.caption(f"Maintenance margin assumption: {MAINTENANCE_MARGIN_RATE:.2%}")
     return risk,today,use_cap,cap,use_daily,daily
 
@@ -91,19 +100,14 @@ def take_profit_plan(entry,stop):
         heading("Take-profit plan", "Set one to three targets and choose how to close the position.")
         count=st.radio("Number of targets",(1,2,3),horizontal=True)
         a,b,c=st.columns([1,2,2]);a.markdown("**Target**");b.markdown("**Price**");c.markdown("**Close position**")
-        targets=[]; remaining=100.0; distance=abs(entry-stop); is_long=entry>stop
+        targets=[]
         for index in range(count):
             a,b,c=st.columns([1,2,2]);a.markdown(f"**TP{index+1}**")
-            default=entry+(distance*(index+1) if is_long else -distance*(index+1))
-            target=b.number_input(f"TP{index+1} price",min_value=.00000001,value=default,format="%.8f",key=f"tp_price_{index}",label_visibility="collapsed")
-            if index==count-1:
-                pct=remaining;c.markdown(f"**{pct:g}%** (remainder)")
-            else:
-                pct=c.number_input(f"TP{index+1} allocation",min_value=.01,max_value=max(.01,remaining-.01),value=round(remaining/(count-index),2),step=1.0,key=f"tp_pct_{index}",label_visibility="collapsed")
-                remaining-=pct
+            target=b.number_input(f"TP{index+1} price",min_value=.00000001,value=None,placeholder="e.g. 1.1100",format="%.8f",key=f"tp_price_{index}",label_visibility="collapsed")
+            pct=c.number_input(f"TP{index+1} allocation",min_value=.01,max_value=100.0,value=None,placeholder="e.g. 50",step=1.0,key=f"tp_pct_{index}",label_visibility="collapsed")
             targets.append((target,pct))
         move=True if count==1 else st.toggle("Move remaining stop to break-even after TP1",value=True)
-        st.caption("The final target receives the remaining allocation, so targets always total 100%.")
+        st.caption("Enter an allocation for every target. Their total must equal 100%.")
     return targets,move
 
 def requirements(result):
@@ -135,13 +139,26 @@ def results(result,market,balance,daily_enabled):
         b.metric("Break-even win rate","N/A" if result["breakeven"] is None else f"{result['breakeven']:.1f}%")
         c.metric("Stop-outs remaining" if daily_enabled else "Fees, all targets",str(result["stopouts_to_limit"]) if daily_enabled else money(result["fees_all_hit"]))
 
-def validation(entry,stop,targets):
-    errors=[]; long=stop<entry; previous=entry
+def validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily):
+    errors=[]
+    required={"Account balance":balance,"Risk per trade":risk,"Entry price":entry,"Stop-loss price":stop}
+    if market["leveraged"]: required["Leverage"]=leverage
+    if market["quote"] in ("cross_direct","cross_inverse"): required["USD conversion-pair price"]=conversion
+    if use_cap: required["Maximum risk"]=cap
+    if use_daily: required["Daily loss limit"]=daily
+    for name,value in required.items():
+        if value is None: errors.append(f"{name} is required.")
+    for index,(target,pct) in enumerate(targets,1):
+        if target is None: errors.append(f"TP{index} price is required.")
+        if pct is None: errors.append(f"TP{index} allocation is required.")
+    if errors: return errors
     if math.isclose(entry,stop): errors.append("Entry and stop-loss prices cannot be the same.")
+    long=stop<entry; previous=entry
     for i,(target,pct) in enumerate(targets,1):
         if (long and target<=previous) or (not long and target>=previous): errors.append(f"TP{i} must be further into profit than the previous price.")
         if pct<=0: errors.append(f"TP{i} allocation must be greater than 0%.")
         previous=target
+    if not math.isclose(sum(pct for _,pct in targets),100.0,abs_tol=1e-6): errors.append("Take-profit allocations must total exactly 100%.")
     return errors
 
 def warnings(result,risk,balance):
@@ -155,20 +172,21 @@ def warnings(result,risk,balance):
 
 def main():
     style();st.title("Position Size Calculator");st.markdown('<p class="sub">A focused trade-planning tool built on your existing calculation engine.</p>',unsafe_allow_html=True);st.divider()
-    left,right=st.columns([1.28,1],gap="large")
-    with left:
-        key,market,balance,entry,stop,leverage,conversion=trade_setup()
-        risk,today,use_cap,cap,use_daily,daily=risk_controls()
-        targets,move=take_profit_plan(entry,stop)
-        pressed=st.button("Calculate position size",type="primary",width="stretch")
+    with st.container(key="main_grid"):
+        left,right=st.columns([1.28,1],gap="large")
+        with left:
+            key,market,balance,entry,stop,leverage,conversion=trade_setup()
+            risk,today,use_cap,cap,use_daily,daily=risk_controls()
+            targets,move=take_profit_plan(entry,stop)
+            pressed=st.button("Calculate position size",type="primary",width="stretch")
     inputs=(key,balance,risk,entry,stop,tuple(targets),conversion,leverage,use_cap,cap,use_daily,daily,today,move)
     current=signature(inputs)
     if pressed:
-        errors=validation(entry,stop,targets)
+        errors=validation(balance,risk,entry,stop,leverage,conversion,market,targets,use_cap,cap,use_daily,daily)
         if errors: st.session_state.pop("result",None);st.session_state["error"]=errors
         else:
             try:
-                st.session_state["result"]=calculate(market,balance,risk,entry,stop,targets,conv_rate=conversion,leverage=leverage,max_risk_per_trade=cap if use_cap else None,daily_limit=daily if use_daily else None,loss_today=today,move_sl_to_be=move)
+                st.session_state["result"]=calculate(market,balance,risk,entry,stop,targets,conv_rate=conversion,leverage=leverage,max_risk_per_trade=cap if use_cap else None,daily_limit=daily if use_daily else None,loss_today=0.0 if today is None else today,move_sl_to_be=move)
                 st.session_state.pop("error",None)
             except ValueError as error: st.session_state.pop("result",None);st.session_state["error"]=[str(error)]
         st.session_state["signature"]=current
